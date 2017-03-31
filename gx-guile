@@ -1,0 +1,103 @@
+#!/bin/sh
+exec guile -e main -s "$0" $@
+!#
+
+; gx-guile - Guile hooks for the gx package manager
+; Copyright (C) 2017 vklquevs@gmail.com
+; Author: Drill Bear <vklquevs@gmail.com>
+; 
+; This program is free software: you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation, either version 3 of the License, or
+; (at your option) any later version.
+; 
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+;
+; You should have received a copy of the GNU General Public License
+; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+(use-modules
+  (srfi srfi-2)
+  (ice-9 popen)
+  (ice-9 rdelim)
+  (ice-9 match))
+
+(define (main args)
+  ; (format (current-error-port) "~a\n" args)
+  (match
+    args
+    [(_ "hook" "post-init" dir)
+     (gx-setup dir)]
+    [(_ "hook" "post-update" old-hash new-hash)
+     (update-hash old-hash new-hash)]
+    [(_ "hook" "post-import" hash)
+     (import-hash hash)]
+    [(_ "rebuild-module")
+     (rebuild-gx-module)]
+    [(_ "set" "lib" name)
+     (set-lib-dir name)]
+    [_ #f]))
+
+(define (gx-setup dir)
+  (chdir dir)
+  (system* "gx" "set" "--in-json" ".guile" "{}")
+  (rebuild-gx-module))
+
+(define (set-lib-dir name)
+  (or (system*/output (format #f "gx view .guile"))
+      (system* "gx" "set" "--in-json" ".guile" "{}"))
+  (system* "gx" "set" ".guile.lib" name)
+  (rebuild-gx-module))
+
+(define (update-hash old new)
+  (rebuild-gx-module))
+
+(define (import-hash hash)
+  (rebuild-gx-module))
+
+(define (system*/output cmd)
+  (with-error-to-file
+    "/dev/null"
+    (lambda ()
+      (let* ([p (open-input-pipe cmd)]
+             [in (read-line p)]
+             [s (close-pipe p)])
+        (and (eq? 0 (status:exit-val s))
+             (string-trim-right in #\newline))))))
+
+(define (get-dep-guile-lib-dir package-name)
+  (system*/output (format #f "gx view ~a .guile.lib" package-name)))
+
+(define (get-depn-name n)
+  (system*/output (format #f "gx view .gxDependencies[~a].name" n)))
+
+(define (get-depn-hash n)
+  (system*/output (format #f "gx view .gxDependencies[~a].hash" n)))
+
+; Don't want to depend on an external json lib (bootstrapping package manager?)
+; so call 'gx view .gxDependencies[n].hash' until gx fails with n too high
+(define (find-dep-hashes)
+  (let loop ([n 0]
+             [acc '()])
+    (let
+      ([res (and-let*
+              ([hash (get-depn-hash n)]
+               [name (get-depn-name n)]
+               [lib-dir (or (get-dep-guile-lib-dir name) ".")])
+              (format #f "gx/ipfs/~a/~a/~a" hash name lib-dir))])
+      (if res (loop (+ 1 n) (cons res acc)) acc))))
+
+; gross
+(define (rebuild-gx-module)
+  (let* ([repos (find-dep-hashes)]
+         [mod (map (lambda (dir) `(add-to-load-path ,dir)) repos)])
+    (unless (file-exists? ".gx")
+      (mkdir ".gx"))
+    (call-with-output-file
+      ".gx/gx.scm"
+      (lambda (port)
+        (for-each (lambda (e) (write e port) (newline port)) mod)))))
+
